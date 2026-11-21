@@ -7,6 +7,7 @@ const path = require("path");
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const MAX_COMMENT_LENGTH = Number(process.env.MAX_COMMENT_LENGTH) || 400;
+const DELETE_WINDOW_MS = 2 * 60 * 1000; // 2 minutos
 const DB_PATH = path.join(__dirname, "comments-db.json");
 
 app.use(cors());
@@ -103,14 +104,16 @@ app.post("/api/comments", (req, res) => {
     });
   }
 
+  const nowMs = Date.now();
   const db = readDb();
   const newEntry = {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `${nowMs}-${Math.random().toString(36).slice(2, 8)}`,
     workId,
     chapterId,
     username,
     comment,
-    date: new Date().toLocaleDateString("es-CO", {
+    createdAtMs: nowMs,
+    date: new Date(nowMs).toLocaleDateString("es-CO", {
       year: "numeric",
       month: "short",
       day: "numeric"
@@ -126,6 +129,69 @@ app.post("/api/comments", (req, res) => {
     comment: newEntry
   });
 });
+
+// DELETE /api/comments/:id (y soporte para /api/comments con id en el body)
+function handleDeleteComment(req, res) {
+  const commentId = String(req.params?.id || req.body?.id || "").trim();
+  const requesterUser = String(req.body?.username || "").trim().toLowerCase();
+
+  if (!commentId) {
+    return res.status(400).json({
+      deleted: false,
+      error: "Falta el id del comentario."
+    });
+  }
+
+  const db = readDb();
+  const index = db.comments.findIndex((item) => String(item.id) === commentId);
+
+  if (index === -1) {
+    return res.status(404).json({
+      deleted: false,
+      error: "El comentario no existe o ya fue eliminado."
+    });
+  }
+
+  const target = db.comments[index];
+
+  if (
+    requesterUser &&
+    target.username &&
+    String(target.username).trim().toLowerCase() !== requesterUser
+  ) {
+    return res.status(403).json({
+      deleted: false,
+      error: "Solo puedes borrar tus propios comentarios."
+    });
+  }
+
+  const createdAtMs = Number(target.createdAtMs);
+  if (!createdAtMs || Number.isNaN(createdAtMs)) {
+    return res.status(403).json({
+      deleted: false,
+      error: "Este comentario ya no está dentro de la ventana de borrado de 2 minutos."
+    });
+  }
+
+  const elapsedMs = Date.now() - createdAtMs;
+  if (elapsedMs > DELETE_WINDOW_MS) {
+    return res.status(403).json({
+      deleted: false,
+      error: "Ya pasaron los 2 minutos; el comentario ahora es permanente."
+    });
+  }
+
+  db.comments.splice(index, 1);
+  writeDb(db);
+
+  return res.json({
+    deleted: true,
+    message: "Comentario eliminado dentro de los 2 minutos."
+  });
+}
+
+app.delete("/api/comments/:id", handleDeleteComment);
+app.delete("/api/comments", handleDeleteComment);
 
 app.listen(PORT, () => {
   console.log(`Servidor de comentarios Lunwind (modo sencillo) activo en puerto ${PORT}`);
